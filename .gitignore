@@ -1,0 +1,5 @@
+client/update
+server/build/
+server/*.elf
+server/*.elf.dbg
+server/*.fx2
