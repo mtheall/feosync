@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #ifdef FEOS
@@ -14,19 +15,19 @@
 #endif
 
 typedef enum {
-  MD5SUM,
-  UPDATE,
-  MKDIR,
+  MD5SUM = 0,
+  UPDATE = 1,
+  MKDIR  = 2,
 } message_type_t;
 
 typedef struct {
   struct {
-    uint32_t size;
+    uint16_t size;
     uint8_t  type;
     int8_t   rc;
   } header;
   union {
-    int8_t  data[1024];
+    uint8_t data[1024];
     uint8_t hash[16];
   };
 } message_t;
@@ -90,6 +91,7 @@ static inline int recvMessage(int s, message_t *msg) {
   if(rc != sizeof(msg->header))
     return rc;
 
+  msg->header.size = ntohs(msg->header.size);
   rc = RECV(s, (char*)msg->data, msg->header.size);
   if(rc == -1)
     return rc;
@@ -98,38 +100,6 @@ static inline int recvMessage(int s, message_t *msg) {
 }
 
 static inline int sendMessage(int s, message_t *msg) {
-  return SEND(s, (char*)&msg->header, sizeof(msg->header) + msg->header.size);
-}
-
-static inline int md5sum(unsigned char *digest, const char *filename) {
-  FILE *fp;
-  MD5_CTX ctx;
-  int rc;
-  static unsigned char data[1024];
-
-  if(digest == NULL || filename == NULL) {
-    errno = EINVAL;
-    return -1;
-  }
-
-  fp = fopen(filename, "rb");
-  if(fp == NULL) {
-    return -1;
-  }
-
-  MD5_Init(&ctx);
-  do {
-    rc = fread(data, 1, sizeof(data), fp);
-    if(rc > 0)
-      MD5_Update(&ctx, data, rc);
-  } while(rc == sizeof(data));
-
-  MD5_Final(digest, &ctx);
-
-  rc = 0;
-  if(ferror(fp))
-    rc = -1;
-
-  fclose(fp);
-  return rc;
+  msg->header.size = htons(msg->header.size);
+  return SEND(s, (char*)&msg->header, sizeof(msg->header) + ntohs(msg->header.size));
 }

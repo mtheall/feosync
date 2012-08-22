@@ -1,5 +1,5 @@
 all:
-	@gcc -g -Wall -o update *.c -lcrypto -iquote ../include
+	@gcc -g -Wall -o update *.c -lcrypto -lz -iquote ../include
 
 install: all
 

@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <zlib.h>
 #include "message.h"
 
 typedef int socklen_t;
@@ -16,6 +17,8 @@ typedef int socklen_t;
 
 static int yes = 1;
 static int no  = 0;
+
+static unsigned char buf[1024];
 
 static int  process(int s);
 static void getHash(message_t *msg);
@@ -176,7 +179,6 @@ void getHash(message_t *msg) {
   MD5_CTX ctx;
   FILE    *fp;
   int     rc;
-  char    data[1024];
 
   if((fp = fopen((char*)msg->data, "rb")) == NULL) {
     if(errno == ENOENT)
@@ -196,8 +198,8 @@ void getHash(message_t *msg) {
     msg->header.size = 0;
     return;
   }
-  while((rc = fread(data, 1, sizeof(data), fp)) > 0)
-    MD5_Update(&ctx, data, rc);
+  while((rc = fread(buf, 1, sizeof(buf), fp)) > 0)
+    MD5_Update(&ctx, buf, rc);
   if(!MD5_Final(msg->hash, &ctx)) {
     fprintf(stderr, "MD5_Update: '%s': Failed to finalize\n", msg->data);
     fclose(fp);
@@ -220,6 +222,9 @@ void getHash(message_t *msg) {
 int update(int s, message_t *msg) {
   FILE *fp;
   int  rc;
+  z_stream strm;
+
+  memset(&strm, 0, sizeof(strm));
 
   if((fp = fopen((char*)msg->data, "wb")) == NULL) {
     fprintf(stderr, "fopen: '%s': %s\n", msg->data, strerror(errno));
@@ -227,6 +232,8 @@ int update(int s, message_t *msg) {
     msg->header.size = 0;
     return -1;
   }
+
+  inflateInit(&strm);
 
   while(1) {
     rc = recvMessage(s, msg);
@@ -236,19 +243,32 @@ int update(int s, message_t *msg) {
       else
         fprintf(stderr, "Error receiving data: %s\n", strerror(errno));
       fclose(fp);
+      inflateEnd(&strm);
       return rc;
     }
     if(msg->header.size == 0) {
-      printf("update completed\n");
+      printf("Compression ratio: %lu.%02lu\n",
+        strm.total_in/strm.total_out,
+        (strm.total_in * 100 / strm.total_out) % 100);
       fclose(fp);
+      inflateEnd(&strm);
       return 1;
     }
-    rc = fwrite(msg->data, 1, msg->header.size, fp);
-    if(rc != msg->header.size) {
-      fprintf(stderr, "fwrite(%p, 1, %u, %p) returns %d\n", msg->data, msg->header.size, fp, rc);
-      fprintf(stderr, "Error writing to file: %s\n", strerror(errno));
-      fclose(fp);
-      return -1;
-    }
+
+    strm.avail_in = msg->header.size;
+    strm.next_in  = msg->data;
+
+    do {
+      strm.avail_out = sizeof(buf);
+      strm.next_out  = buf;
+      inflate(&strm, Z_NO_FLUSH);
+      rc = fwrite(buf, 1, strm.next_out - buf, fp);
+      if(rc != strm.next_out - buf) {
+        fprintf(stderr, "Error writing to file: %s\n", strerror(errno));
+        fclose(fp);
+        inflateEnd(&strm);
+        return -1;
+      }
+    } while(strm.avail_in > 0);
   }
 }
