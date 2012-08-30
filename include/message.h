@@ -11,6 +11,7 @@
 
 #ifdef WIN32
 #include <winsock.h>
+#define ECONNRESET WSAECONNRESET
 #else
 #include <arpa/inet.h>
 #include <sys/socket.h>
