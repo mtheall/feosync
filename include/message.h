@@ -10,7 +10,8 @@
 #endif
 
 #ifdef WIN32
-#include <winsock.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #define ECONNRESET WSAECONNRESET
 #else
 #include <arpa/inet.h>

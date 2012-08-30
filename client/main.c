@@ -9,7 +9,6 @@
 #include "message.h"
 
 #ifdef WIN32
-#include <winsock.h>
 typedef int socklen_t;
 #define SHUT_RDWR SD_BOTH
 void PrintSocketError(const char *name);

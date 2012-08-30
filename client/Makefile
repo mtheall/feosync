@@ -8,6 +8,7 @@ ifeq ($(findstring MINGW,$(shell uname -s)),)
 TARGET := feosync
 else
 TARGET  := feosync.exe
+CFLAGS  += -DWINVER=0x501
 LDFLAGS += -lws2_32
 endif
 
