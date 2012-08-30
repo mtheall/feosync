@@ -1,4 +1,5 @@
 #include <feos.h>
+#include <multifeos.h>
 #include <dswifi9.h>
 #include <errno.h>
 #include <md5.h>
@@ -15,8 +16,8 @@
 typedef int socklen_t;
 #define perror(x) fprintf(stderr, x ": %s\n", strerror(errno))
 
-static int yes = 1;
-static int no  = 0;
+static const int yes = 1;
+static const int no  = 0;
 
 static unsigned char buf[1024];
 
@@ -24,81 +25,166 @@ static int  process(int s);
 static void getHash(message_t *msg);
 static int  update(int s, message_t *msg);
 
-int main(int argc, char *argv[]) {
-  int  rc, s, listener;
-  int  down;
-  struct sockaddr_in addr;
-  socklen_t          addrlen;
-  struct in_addr     ip;
+static volatile thread_t daemon = NULL;
+static volatile bool     quit   = false;
+static volatile int      status = -1;
 
-  if(!Wifi_Startup()) {
-    fprintf(stderr, "Wifi Failed to initialize\n");
-    return 1;
+int feosync(void *param);
+
+int main(int argc, char *argv[]) {
+  if(argc == 1 || (argv[1] && stricmp(argv[1], "start") == 0)) {
+    if(daemon != NULL) { // daemon is already running
+      printf("FeOSync Daemon is already running\n");
+      return 0;
+    }
+
+    // start the daemon
+    FeOS_StayResident();
+    printf("FeOSync Daemon starting\n");
+    daemon = FeOS_CreateThread(DEFAULT_STACK_SIZE, feosync, NULL);
+    if(daemon == NULL) {
+      fprintf(stderr, "Failed to start FeOSync Daemon\n");
+      FeOS_EndStayResident();
+      return 1;
+    }
+
+    // wait for initialization
+    while(status == -1)
+      FeOS_Yield();
+    if(status) {
+      FeOS_EndStayResident();
+      FeOS_ThreadJoin(daemon);
+    }
+    return status;
+  }
+  else if(argv[1] && stricmp(argv[1], "stop") == 0) {
+    if(daemon == NULL) { // daemon is already not running
+      printf("FeOSync Daemon is already stopped\n");
+      return 0;
+    }
+
+    // signal the daemon to stop
+    quit = true;
+    FeOS_ThreadJoin(daemon);
+    printf("FeOSync Daemon is stopping\n");
+    FeOS_EndStayResident();
+    daemon = NULL;
   }
 
-  ip = Wifi_GetIPInfo(NULL, NULL, NULL, NULL);
+  return 0;
+}
 
-  printf("IP: %s\n", inet_ntoa(ip));
+int feosync(void *param) {
+  int  rc, s, listener, broadcaster;
+  struct sockaddr_in addr;
+  socklen_t          addrlen;
+  struct in_addr     ip, netmask;
 
+  // initialize wifi
+  if(!Wifi_Startup()) {
+    fprintf(stderr, "Wifi Failed to initialize\n");
+    return (status = 1);
+  }
+
+  // get ip address and netmask
+  ip = Wifi_GetIPInfo(NULL, &netmask, NULL, NULL);
+
+  // create a listener socket
   listener = socket(AF_INET, SOCK_STREAM, 0);
   if(listener == -1) {
     perror("socket");
     Wifi_Cleanup();
-    return 1;
+    return (status = 1);
   }
 
-  rc = setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-  if(rc == -1) {
-    perror("setsockopt");
+  // create a broadcasting socket
+  broadcaster = socket(AF_INET, SOCK_DGRAM, 0);
+  if(broadcaster == -1) {
+    perror("socket");
     closesocket(listener);
     Wifi_Cleanup();
-    return 1;
+    return (status = 1);
   }
 
-  addr.sin_family = AF_INET;
-  addr.sin_port   = htons(5903);
-  addr.sin_addr.s_addr = INADDR_ANY;
+  // set the socket options
+  if(setsockopt(listener,    SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes))
+  || setsockopt(broadcaster, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes))
+  || setsockopt(broadcaster, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)))
+  {
+    perror("setsockopt");
+    closesocket(listener);
+    closesocket(broadcaster);
+    Wifi_Cleanup();
+    return (status = 1);
+  }
 
+  // bind the listener socket to an address
+  addr.sin_family = AF_INET;
+  addr.sin_port   = htons(0xFE05);
+  addr.sin_addr.s_addr = INADDR_ANY;
   rc = bind(listener, (struct sockaddr*)&addr, sizeof(addr));
   if(rc == -1) {
     perror("bind");
     closesocket(listener);
+    closesocket(broadcaster);
     Wifi_Cleanup();
-    return 1;
+    return (status = 1);
   }
 
-  rc = ioctl(listener, FIONBIO, (char*)&yes);
-  if(rc == -1) {
+  // set the listener and broadcaster sockets to non-blocking
+  if(ioctl(listener,    FIONBIO, (char*)&yes)
+  || ioctl(broadcaster, FIONBIO, (char*)&yes))
+  {
     perror("ioctl");
     closesocket(listener);
+    closesocket(broadcaster);
     Wifi_Cleanup();
-    return 1;
+    return (status = 1);
   }
 
+  // listen for connections
   rc = listen(listener, 5);
   if(rc == -1) {
     perror("listen");
     closesocket(listener);
+    closesocket(broadcaster);
     Wifi_Cleanup();
-    return 1;
+    return (status = 1);
   }
 
-  printf("Waiting for connection\n");
-  printf("Press B to quit\n");
-  do {
+  status = 0;
+
+  while(!quit) {
+    // broadcast yourself
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(0xFE05);
+    addr.sin_addr.s_addr = ip.s_addr | ~netmask.s_addr;
+    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    rc = sendto(broadcaster, &ip, sizeof(ip), (int)NULL, (struct sockaddr*)&addr, sizeof(addr));
+    if(rc == -1 && errno != EWOULDBLOCK)
+      perror("sendto");
+
+    // wait at least one second
+    for(rc = 0; rc < 60; rc++)
+      swiWaitForVBlank();
+
+    // accept a connection
     s = accept(listener, (struct sockaddr*)&addr, &addrlen);
     if(s == -1 && errno != EWOULDBLOCK) {
       perror("accept");
       closesocket(listener);
+      closesocket(broadcaster);
       Wifi_Cleanup();
       return 1;
     }
 
     if(s != -1) {
+      // set connection to blocking
       rc = ioctl(s, FIONBIO, (char*)&no);
       if(rc == -1) {
         perror("ioctl");
         closesocket(listener);
+        closesocket(broadcaster);
         closesocket(s);
         Wifi_Cleanup();
         return 1;
@@ -107,20 +193,17 @@ int main(int argc, char *argv[]) {
       rc = process(s);
       if(rc == -1) {
         closesocket(listener);
+        closesocket(broadcaster);
         closesocket(s);
         Wifi_Cleanup();
         return 1;
       }
       closesocket(s);
-      printf("Waiting for connection\n");
-      printf("Press B to quit\n");
     }
+  }
 
-    swiWaitForVBlank();
-    scanKeys();
-    down = keysDown();
-  } while(!(down & KEY_B));
-
+  closesocket(listener);
+  closesocket(broadcaster);
   Wifi_Cleanup();
   return 0;
 }
@@ -198,8 +281,10 @@ void getHash(message_t *msg) {
     msg->header.size = 0;
     return;
   }
-  while((rc = fread(buf, 1, sizeof(buf), fp)) > 0)
+  while((rc = fread(buf, 1, sizeof(buf), fp)) > 0) {
     MD5_Update(&ctx, buf, rc);
+    FeOS_Yield();
+  }
   if(!MD5_Final(msg->hash, &ctx)) {
     fprintf(stderr, "MD5_Update: '%s': Failed to finalize\n", msg->data);
     fclose(fp);
@@ -269,6 +354,8 @@ int update(int s, message_t *msg) {
         inflateEnd(&strm);
         return -1;
       }
+      if(strm.avail_in > 0)
+        FeOS_Yield();
     } while(strm.avail_in > 0);
   }
 }

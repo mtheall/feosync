@@ -4,14 +4,16 @@
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
-#include <arpa/inet.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#ifdef FEOS
-#include <md5.h>
-#else
+#ifndef FEOS
 #define swiWaitForVBlank() ((void)0)
-#include <openssl/md5.h>
+#endif
+
+#ifdef WIN32
+#include <winsock.h>
+#else
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #endif
 
 typedef enum {
@@ -44,6 +46,8 @@ static inline int RECV(int s, char *buf, size_t size) {
 
     rc = recv(s, &buf[recvd], toRecv, 0);
     if(rc == -1) {
+      if(errno == ECONNRESET)
+        return 0;
       fprintf(stderr, "recv: %s\n", strerror(errno));
       return -1;
     }
@@ -70,6 +74,8 @@ static inline int SEND(int s, char *buf, size_t size) {
 
     rc = send(s, &buf[sent], toSend, 0);
     if(rc == -1) {
+      if(errno == ECONNRESET)
+        return 0;
       fprintf(stderr, "send: %s\n", strerror(errno));
       return -1;
     }

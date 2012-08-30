@@ -28,8 +28,8 @@ BUILD         := build
 SOURCES       := source
 INCLUDES      := ../include
 
-CONF_USERLIBS := feoswifi md5 zlib
-CONF_LIBS     := -lfeoswifi -lmd5 -lzlib
+CONF_USERLIBS := feoswifi md5 zlib multifeos
+CONF_LIBS     := -lfeoswifi -lmd5 -lzlib -lmultifeos
 
 include $(FEOSMK)/app.mk
 

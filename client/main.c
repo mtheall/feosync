@@ -4,12 +4,24 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include <openssl/md5.h>
 #include <zlib.h>
 #include "message.h"
 
+#ifdef WIN32
+#include <winsock.h>
+typedef int socklen_t;
+#define SHUT_RDWR SD_BOTH
+void PrintSocketError(const char *name);
+ssize_t getline(char **lineptr, size_t *n, FILE *stream);
+#else
+#include <sys/socket.h>
+#define closesocket close
+#define PrintSocketError perror
+#endif
+
 static unsigned char buf[1024];
+static const int on = 1;
 
 static int update(int s, const char *filename);
 static int md5sum(unsigned char *digest, const char *filename);
@@ -19,59 +31,97 @@ int main(int argc, char *argv[]) {
   char   *line = NULL;
   size_t linesz = 0;
   int    rc;
-  int    s;
+  int    s, b;
   char   *cmd;
-  const char *ip, *directory;
+  const char *directory;
   message_t msg;
   unsigned char digest[16];
-  struct addrinfo hints, *res;
+  struct sockaddr_in addr;
+  socklen_t          addr_len = sizeof(addr);
 
-  if(argc != 3) {
-    fprintf(stderr, "Usage: %s <ip> <directory>\n", argv[0]);
+  if(argc != 2) {
+    fprintf(stderr, "Usage: %s <directory>\n", argv[0]);
     return 1;
   }
 
-  ip = argv[1];
-  directory = argv[2];
+  directory = argv[1];
 
   if(chdir(directory)) {
     fprintf(stderr, "chdir('%s'):  %s\n", directory, strerror(errno));
     return 1;
   }
 
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-  if((rc = getaddrinfo(ip, "5903", &hints, &res))) {
-    fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+#ifdef WIN32
+  WSADATA wsaData;
+  if(WSAStartup(MAKEWORD(2,0), &wsaData) != 0) {
+    fprintf(stderr, "WSAStartup failed.\n");
     return 1;
   }
+  atexit((void(*)(void))WSACleanup);
+#endif
+
+  b = socket(AF_INET, SOCK_DGRAM, 0);
+  if(b == -1) {
+    PrintSocketError("socket");
+    return 1;
+  }
+
+  addr.sin_family = AF_INET;
+  addr.sin_port   = htons(0xFE05);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  if(setsockopt(b, SOL_SOCKET, SO_BROADCAST, (const char*)&on, sizeof(on))
+  || setsockopt(b, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on)))
+  {
+    PrintSocketError("setsockopt");
+    shutdown(b, SHUT_RDWR);
+    closesocket(b);
+    return 1;
+  }
+  if(bind(b, (struct sockaddr*)&addr, sizeof(addr)))
+  {
+    PrintSocketError("bind");
+    shutdown(b, SHUT_RDWR);
+    closesocket(b);
+    return 1;
+  }
+
+  rc = recvfrom(b, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&addr, &addr_len);
+  shutdown(b, SHUT_RDWR);
+  closesocket(b);
+  if(rc <= 0) {
+    if(rc == -1)
+      PrintSocketError("recvfrom");
+    return 1;
+  }
+  addr.sin_port = htons(0xFE05);
+  printf("Connecting to %s\n", inet_ntoa(addr.sin_addr));
+  printf("port = %d\n", ntohs(addr.sin_port));
 
   s = socket(AF_INET, SOCK_STREAM, 0);
   if(s == -1) {
-    fprintf(stderr, "socket:  %s\n", strerror(errno));
-    freeaddrinfo(res);
+    PrintSocketError("socket");
     return 1;
   }
 
-  if(connect(s, res->ai_addr, res->ai_addrlen) == -1) {
-    fprintf(stderr, "connect('%s'): %s\n", ip, strerror(errno));
-    freeaddrinfo(res);
-    close(s);
+  if(connect(s, (struct sockaddr*)&addr, addr_len) == -1) {
+    PrintSocketError("connect");
+    shutdown(s, SHUT_RDWR);
+    closesocket(s);
     return 1;
   }
-  freeaddrinfo(res);
 
   cmd = "find * -type d | sort";
   find = popen(cmd, "r");
   if(find == NULL) {
     fprintf(stderr, "popen('%s'): %s\n", cmd, strerror(errno));
-    close(s);
+    shutdown(s, SHUT_RDWR);
+    closesocket(s);
     return 1;
   }
 
   while((rc = getline(&line, &linesz, find)) != -1) {
-    line[rc-1] = 0;
+    if(line[rc-1] == '\n')
+      line[rc-1] = 0;
     memset(&msg, 0, sizeof(msg));
     msg.header.size = rc+1;
     msg.header.type = MKDIR;
@@ -81,7 +131,8 @@ int main(int argc, char *argv[]) {
 
     rc = sendMessage(s, &msg);
     if(rc <= 0) {
-      close(s);
+      shutdown(s, SHUT_RDWR);
+      closesocket(s);
       pclose(find);
       free(line);
       return 1;
@@ -89,7 +140,8 @@ int main(int argc, char *argv[]) {
 
     rc = recvMessage(s, &msg);
     if(rc <= 0 || msg.header.rc == -1) {
-      close(s);
+      shutdown(s, SHUT_RDWR);
+      closesocket(s);
       pclose(find);
       free(line);
       return 1;
@@ -101,13 +153,15 @@ int main(int argc, char *argv[]) {
   find = popen(cmd, "r");
   if(find == NULL) {
     fprintf(stderr, "popen('%s'): %s\n", cmd, strerror(errno));
-    close(s);
+    shutdown(s, SHUT_RDWR);
+    closesocket(s);
     free(line);
     return 1;
   }
 
   while((rc = getline(&line, &linesz, find)) != -1) {
-    line[rc-1] = 0;
+    if(line[rc-1] == '\n')
+      line[rc-1] = 0;
     memset(&msg, 0, sizeof(msg));
     msg.header.size = rc+1;
     msg.header.type = MD5SUM;
@@ -117,7 +171,8 @@ int main(int argc, char *argv[]) {
 
     rc = sendMessage(s, &msg);
     if(rc <= 0 || msg.header.rc == -1) {
-      close(s);
+      shutdown(s, SHUT_RDWR);
+      closesocket(s);
       pclose(find);
       free(line);
       return 1;
@@ -125,7 +180,8 @@ int main(int argc, char *argv[]) {
 
     rc = md5sum(digest, line);
     if(rc == -1) {
-      close(s);
+      shutdown(s, SHUT_RDWR);
+      closesocket(s);
       pclose(find);
       free(line);
       return 1;
@@ -133,7 +189,8 @@ int main(int argc, char *argv[]) {
 
     rc = recvMessage(s, &msg);
     if(rc <= -1 || msg.header.rc == -1) {
-      close(s);
+      shutdown(s, SHUT_RDWR);
+      closesocket(s);
       pclose(find);
       free(line);
       return 1;
@@ -143,7 +200,8 @@ int main(int argc, char *argv[]) {
       fprintf(stderr, "update /%s\n", line);
       rc = update(s, line);
       if(rc <= 0) {
-        close(s);
+        shutdown(s, SHUT_RDWR);
+        closesocket(s);
         pclose(find);
         free(line);
         return 1;
@@ -191,7 +249,7 @@ static int update(int s, const char *filename) {
   strm.next_out  = msg.data;
 
   do {
-    /* need to grab more input */
+    // need to grab more input
     if(strm.avail_in == 0) {
       rc = fread(buf, 1, sizeof(buf), fp);
       if(ferror(fp)) {
@@ -206,7 +264,7 @@ static int update(int s, const char *filename) {
 
     rc = deflate(&strm, flush);
 
-    /* filled up the output buffer or finished compressing  */
+    // filled up the output buffer or finished compressing
     if(strm.avail_out == 0 || rc == Z_STREAM_END) {
       msg.header.size = strm.next_out - msg.data;
       rc2 = sendMessage(s, &msg);
@@ -266,3 +324,75 @@ static int md5sum(unsigned char *digest, const char *filename) {
   fclose(fp);
   return rc;
 }
+
+#ifdef WIN32
+ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+  static char  line[1024];
+  char         *ptr;
+  size_t       len;
+
+  if(lineptr == NULL || n == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  if(ferror(stream) || feof(stream))
+    return -1;
+
+  if((ptr = fgets(line, sizeof(line), stream)) == NULL)
+    return -1;
+
+  len = strlen(line);
+  if(*lineptr == NULL)
+    *n = 0;
+  if(*n < len) {
+    ptr = realloc(*lineptr, len);
+    if(ptr == NULL)
+      return -1;
+    *lineptr = ptr;
+    *n = len;
+  }
+
+  memcpy(*lineptr, line, len+1);
+  return len;
+}
+
+void PrintSocketError(const char *name) {
+  switch(WSAGetLastError()) {
+#define ERR(x) case x: fprintf(stderr, "%s:" #x "\n", name); break;
+    ERR(WSAEACCES)
+    ERR(WSAEADDRINUSE)
+    ERR(WSAEADDRNOTAVAIL)
+    ERR(WSAEAFNOSUPPORT)
+    ERR(WSAEALREADY)
+    ERR(WSAECONNABORTED)
+    ERR(WSAECONNREFUSED)
+    ERR(WSAECONNRESET)
+    ERR(WSAEFAULT)
+    ERR(WSAEHOSTUNREACH)
+    ERR(WSAEINPROGRESS)
+    ERR(WSAEINTR)
+    ERR(WSAEINVAL)
+    ERR(WSAEISCONN)
+    ERR(WSAEMFILE)
+    ERR(WSAEMSGSIZE)
+    ERR(WSAENETDOWN)
+    ERR(WSAENETRESET)
+    ERR(WSAENETUNREACH)
+    ERR(WSAENOBUFS)
+    ERR(WSAENOPROTOOPT)
+    ERR(WSAENOTCONN)
+    ERR(WSAENOTSOCK)
+    ERR(WSAEOPNOTSUPP)
+    ERR(WSAEPROTONOSUPPORT)
+    ERR(WSAEPROTOTYPE)
+    ERR(WSAEPROVIDERFAILEDINIT)
+    ERR(WSAESHUTDOWN)
+    ERR(WSAESOCKTNOSUPPORT)
+    ERR(WSAETIMEDOUT)
+    ERR(WSAEWOULDBLOCK)
+    ERR(WSAEINVALIDPROCTABLE)
+    ERR(WSAEINVALIDPROVIDER)
+    ERR(WSANOTINITIALISED)
+  }
+}
+#endif

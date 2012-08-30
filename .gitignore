@@ -1,4 +1,5 @@
-client/update
+client/feosync*
+client/*.o
 server/build/
 server/*.elf
 server/*.elf.dbg
