@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <netdb.h>
 #include <openssl/md5.h>
 #include <zlib.h>
 #include "message.h"
@@ -16,6 +15,7 @@ typedef int socklen_t;
 void PrintSocketError(const char *name);
 ssize_t getline(char **lineptr, size_t *n, FILE *stream);
 #else
+#include <netdb.h>
 #include <sys/socket.h>
 #define closesocket close
 #define PrintSocketError perror
