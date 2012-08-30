@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <netdb.h>
 #include <openssl/md5.h>
 #include <zlib.h>
 #include "message.h"
@@ -33,18 +34,21 @@ int main(int argc, char *argv[]) {
   int    rc;
   int    s, b;
   char   *cmd;
-  const char *directory;
+  const char *host = NULL, *directory;
   message_t msg;
   unsigned char digest[16];
+  struct addrinfo hints, *res;
   struct sockaddr_in addr;
   socklen_t          addr_len = sizeof(addr);
 
-  if(argc != 2) {
-    fprintf(stderr, "Usage: %s <directory>\n", argv[0]);
+  if(argc != 2 && argc != 3) {
+    fprintf(stderr, "Usage: %s <directory> [host]\n", argv[0]);
     return 1;
   }
 
   directory = argv[1];
+  if(argc == 3)
+    host = argv[2];
 
   if(chdir(directory)) {
     fprintf(stderr, "chdir('%s'):  %s\n", directory, strerror(errno));
@@ -60,40 +64,55 @@ int main(int argc, char *argv[]) {
   atexit((void(*)(void))WSACleanup);
 #endif
 
-  b = socket(AF_INET, SOCK_DGRAM, 0);
-  if(b == -1) {
-    PrintSocketError("socket");
-    return 1;
-  }
+  if(host == NULL) { // host not provided; attempt to auto-discover
+    b = socket(AF_INET, SOCK_DGRAM, 0);
+    if(b == -1) {
+      PrintSocketError("socket");
+      return 1;
+    }
 
-  addr.sin_family = AF_INET;
-  addr.sin_port   = htons(0xFE05);
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  if(setsockopt(b, SOL_SOCKET, SO_BROADCAST, (const char*)&on, sizeof(on))
-  || setsockopt(b, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on)))
-  {
-    PrintSocketError("setsockopt");
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(0xFE05);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    if(setsockopt(b, SOL_SOCKET, SO_BROADCAST, (const char*)&on, sizeof(on))
+    || setsockopt(b, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on)))
+    {
+      PrintSocketError("setsockopt");
+      shutdown(b, SHUT_RDWR);
+      closesocket(b);
+      return 1;
+    }
+    if(bind(b, (struct sockaddr*)&addr, sizeof(addr)))
+    {
+      PrintSocketError("bind");
+      shutdown(b, SHUT_RDWR);
+      closesocket(b);
+      return 1;
+    }
+
+    rc = recvfrom(b, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&addr, &addr_len);
     shutdown(b, SHUT_RDWR);
     closesocket(b);
-    return 1;
+    if(rc <= 0) {
+      if(rc == -1)
+        PrintSocketError("recvfrom");
+      return 1;
+    }
+    addr.sin_port = htons(0xFE05);
   }
-  if(bind(b, (struct sockaddr*)&addr, sizeof(addr)))
-  {
-    PrintSocketError("bind");
-    shutdown(b, SHUT_RDWR);
-    closesocket(b);
-    return 1;
+  else { // host was provided
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if((rc = getaddrinfo(host, "65029", &hints, &res))) {
+      fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+      return 1;
+    }
+    memcpy(&addr, res->ai_addr, res->ai_addrlen);
+    addr_len = res->ai_addrlen;
+    freeaddrinfo(res);
   }
 
-  rc = recvfrom(b, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&addr, &addr_len);
-  shutdown(b, SHUT_RDWR);
-  closesocket(b);
-  if(rc <= 0) {
-    if(rc == -1)
-      PrintSocketError("recvfrom");
-    return 1;
-  }
-  addr.sin_port = htons(0xFE05);
   printf("Connecting to %s\n", inet_ntoa(addr.sin_addr));
   printf("port = %d\n", ntohs(addr.sin_port));
 

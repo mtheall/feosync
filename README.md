@@ -88,7 +88,7 @@ running sync job before exiting.
 
 The FeOSync client has only one command:
 
-    feosync <directory>
+    feosync <directory> [host]
 
 The client will switch to the provided directory, then it will connect to the
 daemon and begin the sync process. It will clone the provided directory to the
@@ -96,6 +96,10 @@ root of the storage device where FeOS resides. Therefore, it is best to provide
 $FEOSDEST as the directory for updating FeOS. For copying other data, such as
 music or programs, the directory chosen must have a layout that you want to
 put onto the storage card.
+
+If no host is provided, the client will attempt to autodiscover the daemon by
+listening for the broadcast packets. If a host is provided, then the client
+will attempt to connect immediately without listening for the broadcast.
 
 ### The sync process
 
