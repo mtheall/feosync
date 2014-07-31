@@ -39,12 +39,12 @@ int main(int argc, char *argv[]) {
     }
 
     // start the daemon
-    FeOS_StayResident();
+    LdrBeginResidency();
     printf("FeOSync Daemon starting\n");
     daemon = FeOS_CreateThread(DEFAULT_STACK_SIZE, feosync, NULL);
     if(daemon == NULL) {
       fprintf(stderr, "Failed to start FeOSync Daemon\n");
-      FeOS_EndStayResident();
+      LdrEndResidency();
       return 1;
     }
 
@@ -52,7 +52,7 @@ int main(int argc, char *argv[]) {
     while(status == -1)
       FeOS_Yield();
     if(status) {
-      FeOS_EndStayResident();
+      LdrEndResidency();
       FeOS_ThreadJoin(daemon);
     }
     return status;
@@ -67,7 +67,7 @@ int main(int argc, char *argv[]) {
     quit = true;
     FeOS_ThreadJoin(daemon);
     printf("FeOSync Daemon is stopping\n");
-    FeOS_EndStayResident();
+    LdrEndResidency();
     daemon = NULL;
   }
 
