@@ -296,9 +296,14 @@ static int update(int s, const char *filename) {
     }
   } while(rc == Z_OK);
 
-  printf("Compression ratio: %lu.%02lu\n",
-    strm.total_out/strm.total_in,
-    (strm.total_out * 100 / strm.total_in) % 100);
+  if(strm.total_in > 0)
+  {
+    printf("Compression ratio: %lu.%02lu\n",
+      strm.total_out/strm.total_in,
+      (strm.total_out * 100 / strm.total_in) % 100);
+  }
+  else
+    printf("Compression ratio: empty file\n");
 
   fclose(fp);
   deflateEnd(&strm);

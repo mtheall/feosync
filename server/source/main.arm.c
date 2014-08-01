@@ -332,9 +332,14 @@ int update(int s, message_t *msg) {
       return rc;
     }
     if(msg->header.size == 0) {
-      printf("Compression ratio: %lu.%02lu\n",
-        strm.total_in/strm.total_out,
-        (strm.total_in * 100 / strm.total_out) % 100);
+      if(strm.total_out > 0)
+      {
+        printf("Compression ratio: %lu.%02lu\n",
+          strm.total_in/strm.total_out,
+          (strm.total_in * 100 / strm.total_out) % 100);
+      }
+      else
+        printf("Compression ratio: empty file\n");
       fclose(fp);
       inflateEnd(&strm);
       return 1;
